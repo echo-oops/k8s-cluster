@@ -1,0 +1,241 @@
+# values.yaml
+# Helm values for ingress-nginx controller (stable, production-ready defaults for on-prem / small cluster)
+# Usage:
+#   helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+#   helm repo update
+#   helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx -n ingress-nginx --create-namespace -f infrastructure/ingress-nginx/values.yaml
+#
+# This configuration uses Service type NodePort for on-prem environments.
+# Adjust nodePorts, resources, and affinity/tolerations to match your environment.
+
+controller:
+  name: controller
+  replicaCount: 2
+
+  # Use hostNetwork only if you need to bind to host ports directly (not recommended unless required)
+  hostNetwork: false
+
+  # Service configuration: NodePort for on-prem. For cloud, change to LoadBalancer and remove nodePorts.
+  service:
+    enabled: true
+    type: NodePort
+    externalTrafficPolicy: Local
+    annotations: {}
+    # NodePort assignments (choose ports outside of reserved ranges)
+    nodePorts:
+      http: 30080
+      https: 30443
+    ports:
+      http: 80
+      https: 443
+      # metrics port for Prometheus scraping
+      metrics: 10254
+
+  # Controller container image
+  image:
+    repository: k8s.gcr.io/ingress-nginx/controller
+    tag: "v1.8.1" # pin to a stable version; update as needed
+    pullPolicy: IfNotPresent
+
+  # Resource requests/limits for controller pods
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+  # Liveness and readiness probes
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: 10254
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    httpGet:
+      path: /ready
+      port: 10254
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+  # Extra args passed to ingress-nginx controller
+  extraArgs:
+    enable-ssl-passthrough: "false"
+    publish-service: "ingress-nginx/controller"
+    enable-ssl-chain-completion: "true"
+    # Tune timeouts
+    proxy-read-timeout: "600"
+    proxy-send-timeout: "600"
+    proxy-body-size: "8m"
+
+  # Extra environment variables
+  env:
+    - name: POD_NAMESPACE
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+
+  # Node affinity and tolerations to control scheduling
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - ingress-nginx
+          topologyKey: "kubernetes.io/hostname"
+  tolerations:
+    - key: "node-role.kubernetes.io/control-plane"
+      operator: "Exists"
+      effect: "NoSchedule"
+    - key: "node-role.kubernetes.io/master"
+      operator: "Exists"
+      effect: "NoSchedule"
+
+  # Security context for controller pods
+  podSecurityContext:
+    runAsUser: 101
+    runAsGroup: 101
+    fsGroup: 101
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+
+  # ServiceAccount and RBAC
+  serviceAccount:
+    create: true
+    name: ingress-nginx-sa
+  rbac:
+    create: true
+
+  # Metrics and Prometheus scraping
+  metrics:
+    enabled: true
+    service:
+      annotations: {}
+      labels: {}
+    # Expose metrics on the controller service (port 10254)
+    serviceMonitor:
+      enabled: true
+      namespace: monitoring
+      interval: 30s
+      scrapeTimeout: 10s
+      labels:
+        release: prometheus
+      metricRelabelings: []
+
+  # Custom configuration for NGINX via ConfigMap
+  config:
+    name: nginx-configuration
+    entries:
+      proxy-body-size: "8m"
+      proxy-read-timeout: "600"
+      proxy-send-timeout: "600"
+      use-forwarded-headers: "true"
+      compute-full-forwarded-for: "true"
+      enable-vts-status: "false"
+      http2-max-field-size: "16k"
+      http2-max-header-size: "64k"
+
+  # TCP and UDP services mapping (optional)
+  tcp:
+    # Example: expose a TCP service through ingress-nginx on port 3306 -> service mysql:3306
+    # "3306": "default/mysql:3306"
+  udp: {}
+
+  # Admission webhook configuration (for validating ingress resources)
+  admissionWebhooks:
+    enabled: true
+    patch:
+      enabled: true
+    failurePolicy: Fail
+
+  # Extra volumes and mounts (e.g., for custom TLS certs)
+  extraVolumes: []
+  extraVolumeMounts: []
+
+  # Node selector (example: prefer worker nodes)
+  nodeSelector:
+    kubernetes.io/os: linux
+
+  # Lifecycle hooks
+  lifecycle:
+    preStop:
+      exec:
+        command:
+          - /bin/sh
+          - -c
+          - "sleep 5"
+
+defaultBackend:
+  enabled: false
+  image:
+    repository: k8s.gcr.io/defaultbackend-amd64
+    tag: "1.5"
+
+controllerAdmission:
+  enabled: true
+
+# Controller ingressClass resource (create an IngressClass CR)
+ingressClassResource:
+  enabled: true
+  name: nginx
+  controllerValue: "k8s.io/ingress-nginx"
+
+# Controller ingressClass parameters (optional)
+ingressClass:
+  create: true
+  name: nginx
+  controller: k8s.io/ingress-nginx
+
+# Horizontal Pod Autoscaler (optional)
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 60
+
+# NodePort range validation and notes
+# Ensure nodePorts (30080/30443) are allowed in your firewall/security group.
+# For cloud environments, set service.type: LoadBalancer and remove nodePorts.
+
+# Extra manifests to apply after install (e.g., NetworkPolicy to allow external traffic to NodePort)
+extraDeploy:
+  - |
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: allow-ingress-nodeport
+      namespace: ingress-nginx
+    spec:
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: ingress-nginx
+      policyTypes:
+        - Ingress
+      ingress:
+        - from:
+            - ipBlock:
+                cidr: 0.0.0.0/0
+          ports:
+            - protocol: TCP
+              port: 30080
+            - protocol: TCP
+              port: 30443
+
+# Notes:
+# - Replace image tags with the latest stable release when upgrading.
+# - For production, consider using a LoadBalancer service or MetalLB for on-prem load balancing.
+# - If using TLS, create Kubernetes Secrets with TLS certs and reference them in Ingress resources.
+# - When enabling hostNetwork=true, ensure port conflicts are managed and security implications are understood.

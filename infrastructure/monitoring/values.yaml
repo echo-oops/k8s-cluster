@@ -1,0 +1,315 @@
+# values.yaml
+# Custom values for installing kube-prometheus-stack (Prometheus + Alertmanager + Grafana + exporters)
+# Tailor these values to your environment before applying.
+#
+# Usage:
+#   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+#   helm repo update
+#   helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+#     -n monitoring --create-namespace -f infrastructure/monitoring/values.yaml
+#
+# Notes:
+# - Persistence uses PVCs; ensure your cluster has a StorageClass that supports the requested sizes.
+# - Secrets (Grafana admin password, SMTP credentials, etc.) should be provided via Kubernetes Secret or SealedSecret.
+# - ServiceMonitors below assume your frontend/backend charts expose /metrics on the named port "metrics" or "http".
+# - Adjust resource requests/limits to match your node sizes.
+
+global:
+  # Set to true to enable cluster-wide scraping of kubelet metrics via service discovery
+  scrape_interval: 15s
+
+prometheusOperator:
+  createCustomResource: true
+  tlsProxy:
+    enabled: false
+
+prometheus:
+  enabled: true
+  serviceAccount:
+    create: true
+    name: prometheus-sa
+  prometheusSpec:
+    serviceMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorSelector:
+      matchExpressions:
+        - { key: app.kubernetes.io/managed-by, operator: In, values: [helm] }
+    podMonitorSelector: {}
+    ruleSelector:
+      matchLabels:
+        role: alert-rules
+    retention: 15d
+    retentionSize: "50Gi"
+    evaluationInterval: 30s
+    scrapeInterval: 15s
+    externalLabels:
+      cluster: "k8s-cluster"
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 50Gi
+          storageClassName: "standard" # adjust to your environment
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: 1500m
+        memory: 4Gi
+    alerting:
+      alertmanagers:
+        - namespace: monitoring
+          name: alertmanager
+          port: web
+
+alertmanager:
+  enabled: true
+  alertmanagerSpec:
+    replicas: 2
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+    storage:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+          storageClassName: "standard"
+
+grafana:
+  enabled: true
+  adminUser: admin
+  # For security, set adminPassword via Kubernetes Secret (see README). Default below is for quickstart only.
+  adminPassword: "ChangeMe!2026" 
+  ingress:
+    enabled: false
+  service:
+    type: ClusterIP
+    port: 80
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClassName: "standard"
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      access: proxy
+      url: http://loki.logging.svc.cluster.local:3100
+      isDefault: false
+  dashboards:
+    # Example: include a basic Kubernetes cluster dashboard and app dashboards
+    default:
+      kube-cluster-overview:
+        gnetId: 6417
+        revision: 1
+        datasource: Prometheus
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+    datasources:
+      enabled: true
+      label: grafana_datasource
+
+kubeStateMetrics:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 512Mi
+
+nodeExporter:
+  enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 300m
+      memory: 512Mi
+
+prometheus-node-exporter:
+  enabled: true
+
+# Additional scrape configs (if you need to scrape external targets)
+additionalPrometheusScrapeConfigs: |
+  # Example: scrape an external blackbox exporter
+  # - job_name: 'blackbox'
+  #   metrics_path: /probe
+  #   params:
+  #     module: [http_2xx]
+  #   static_configs:
+  #     - targets:
+  #       - http://example.com
+  #   relabel_configs:
+  #     - source_labels: [__address__]
+  #       target_label: __param_target
+  #     - source_labels: [__param_target]
+  #       target_label: instance
+  #     - target_label: __address__
+  #       replacement: blackbox-exporter.monitoring.svc.cluster.local:9115
+
+# Configure PrometheusRule alerts (basic examples)
+prometheusRules:
+  enabled: true
+  additionalPrometheusRules:
+    - name: k8s-apps.rules
+      groups:
+        - name: k8s-apps
+          rules:
+            - alert: HighErrorRate
+              expr: |
+                sum(rate(http_requests_total{job=~"frontend|backend",status=~"5.."}[5m])) by (job) 
+                / sum(rate(http_requests_total{job=~"frontend|backend"}[5m])) by (job) > 0.05
+              for: 5m
+              labels:
+                severity: warning
+              annotations:
+                summary: "High 5xx error rate on {{ $labels.job }}"
+                description: "More than 5% of requests are returning 5xx for {{ $labels.job }} over the last 5 minutes."
+
+            - alert: InstanceDown
+              expr: up == 0
+              for: 5m
+              labels:
+                severity: critical
+              annotations:
+                summary: "Instance down ({{ $labels.instance }})"
+                description: "Prometheus target {{ $labels.instance }} has been down for more than 5 minutes."
+
+# ServiceMonitors for demo applications (frontend/backend)
+# These ServiceMonitors assume your Helm charts create Services with labels matching app: frontend-frontend and app: backend-backend
+additionalServiceMonitors:
+  - name: frontend-servicemonitor
+    selector:
+      matchLabels:
+        app: frontend-frontend
+    namespaceSelector:
+      any: true
+    endpoints:
+      - port: metrics
+        path: /metrics
+        interval: 15s
+        scrapeTimeout: 10s
+  - name: backend-servicemonitor
+    selector:
+      matchLabels:
+        app: backend-backend
+    namespaceSelector:
+      any: true
+    endpoints:
+      - port: metrics
+        path: /metrics
+        interval: 15s
+        scrapeTimeout: 10s
+
+# RBAC and security settings
+rbac:
+  create: true
+
+serviceAccounts:
+  server:
+    create: true
+    name: prometheus-server
+
+# TLS settings for Grafana (optional) - recommend using Ingress with cert-manager in production
+# grafana:
+#   ingress:
+#     enabled: true
+#     annotations:
+#       kubernetes.io/ingress.class: nginx
+#       cert-manager.io/cluster-issuer: letsencrypt-prod
+#     hosts:
+#       - grafana.example.com
+#     tls:
+#       - secretName: grafana-tls
+#         hosts:
+#           - grafana.example.com
+
+# Alertmanager notification configuration (example using Slack)
+# For production, store webhook URL in a Kubernetes Secret and reference it here via templating or external secret.
+alertmanagerConfig:
+  enabled: true
+  config:
+    global:
+      resolve_timeout: 5m
+    route:
+      receiver: 'team-slack'
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 3h
+    receivers:
+      - name: 'team-slack'
+        slack_configs:
+          - api_url: 'https://hooks.slack.com/services/REPLACE_WITH_SECRET' # replace with Secret reference in production
+            channel: '#alerts'
+            send_resolved: true
+
+# Prometheus Adapter (optional) - enable if you need custom metrics for HPA
+prometheusAdapter:
+  enabled: false
+
+# Pod disruption budgets for critical components
+pdb:
+  prometheus:
+    enabled: true
+    minAvailable: 1
+  alertmanager:
+    enabled: true
+    minAvailable: 1
+  grafana:
+    enabled: false
+
+# Node affinity / tolerations (example to prefer non-master nodes)
+prometheus:
+  prometheusSpec:
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+                - key: app.kubernetes.io/name
+                  operator: In
+                  values:
+                    - prometheus
+            topologyKey: "kubernetes.io/hostname"
+
+# Prometheus Operator image overrides (pin to stable images)
+image:
+  prometheus:
+    repository: quay.io/prometheus/prometheus
+    tag: v2.45.0
+  alertmanager:
+    repository: quay.io/prometheus/alertmanager
+    tag: v0.25.0
+  grafana:
+    repository: grafana/grafana
+    tag: 10.0.0
+
+# Tolerations for running on control-plane nodes if necessary
+tolerations: []
+
+# Extra environment variables for Prometheus server (if needed)
+extraEnv:
+  - name: TZ
+    value: "UTC"
+
+# End of values.yaml
