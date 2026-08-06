@@ -1,0 +1,123 @@
+# Cluster-wide readonly role and binding
+# Grants read-only access to common cluster resources for auditing/observability users.
+# Bind this ClusterRole to a specific user or group (e.g., readonly-user) used by humans or automation.
+#
+# Apply with:
+#   kubectl apply -f infrastructure/rbac/readonly-user.yaml
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: readonly
+  labels:
+    rbac.authorization.k8s.io/role: readonly
+rules:
+  # Core resources: pods, services, endpoints, namespaces, nodes
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - services
+      - endpoints
+      - namespaces
+      - nodes
+      - persistentvolumeclaims
+      - persistentvolumes
+    verbs:
+      - get
+      - list
+      - watch
+
+  # Workloads: deployments, statefulsets, daemonsets, replicasets
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - statefulsets
+      - daemonsets
+      - replicasets
+    verbs:
+      - get
+      - list
+      - watch
+
+  # Batch resources
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+      - cronjobs
+    verbs:
+      - get
+      - list
+      - watch
+
+  # Networking resources
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+      - networkpolicies
+    verbs:
+      - get
+      - list
+      - watch
+
+  # RBAC read-only
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources:
+      - roles
+      - rolebindings
+      - clusterroles
+      - clusterrolebindings
+    verbs:
+      - get
+      - list
+      - watch
+
+  # Monitoring and custom resources commonly used by monitoring stacks
+  - apiGroups: ["monitoring.coreos.com"]
+    resources:
+      - servicemonitors
+      - prometheusrules
+    verbs:
+      - get
+      - list
+      - watch
+
+  - apiGroups: ["apps", "extensions"]
+    resources:
+      - ingressclasses
+    verbs:
+      - get
+      - list
+      - watch
+
+  # CRDs: allow read access to all custom resources (best-effort)
+  - apiGroups: ["*"]
+    resources:
+      - customresourcedefinitions
+    verbs:
+      - get
+      - list
+      - watch
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: readonly-binding
+  labels:
+    rbac.authorization.k8s.io/binding: readonly-binding
+subjects:
+  # Bind to a specific user (replace 'readonly-user' with your identity provider username)
+  - kind: User
+    name: readonly-user
+    apiGroup: rbac.authorization.k8s.io
+
+  # Optionally bind to a group (uncomment and adjust if using group-based SSO)
+  # - kind: Group
+  #   name: readonly-users
+  #   apiGroup: rbac.authorization.k8s.io
+
+roleRef:
+  kind: ClusterRole
+  name: readonly
+  apiGroup: rbac.authorization.k8s.io

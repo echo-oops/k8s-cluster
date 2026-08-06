@@ -1,0 +1,20 @@
+# default-deny.yaml
+# Default deny NetworkPolicy for the 'default' namespace.
+# This policy denies all ingress and egress traffic to/from pods in the default namespace
+# unless other NetworkPolicies explicitly allow it.
+#
+# Apply with:
+#   kubectl apply -f infrastructure/network-policies/default-deny.yaml
+#
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: default
+  labels:
+    policy.k8s.io/managed-by: network-policies
+spec:
+  podSelector: {}                # Selects all pods in the namespace
+  policyTypes:
+    - Ingress
+    - Egress

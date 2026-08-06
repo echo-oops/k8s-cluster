@@ -1,0 +1,134 @@
+# ServiceAccount and Role for CI/CD deployer
+# Grants limited permissions in the 'default' namespace to perform Helm-based deployments,
+# manage Deployments/Services/ConfigMaps/Secrets/Ingress and read Pods/Events.
+# This ServiceAccount is intended to be used by CI runners (GitLab CI, Jenkins) via a
+# short-lived kubeconfig or token mounted into the CI job.
+#
+# Apply with:
+#   kubectl apply -f infrastructure/rbac/ci-user.yaml
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ci-deployer
+  namespace: default
+  labels:
+    app.kubernetes.io/name: ci-deployer
+    app.kubernetes.io/managed-by: ci
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ci-deploy-role
+  namespace: default
+  labels:
+    app.kubernetes.io/name: ci-deploy-role
+rules:
+  # Core resources: pods (read), services (full), configmaps (full), secrets (limited)
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - pods/exec
+      - services
+      - endpoints
+      - configmaps
+      - secrets
+      - serviceaccounts
+      - events
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+
+  # Workloads: deployments, statefulsets, daemonsets
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - deployments/scale
+      - statefulsets
+      - daemonsets
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+
+  # Batch jobs and cronjobs
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+      - cronjobs
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+
+  # Ingress resources
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+      - ingressclasses
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+
+  # Allow CI to create SealedSecrets (Bitnami SealedSecrets CRD) so secrets can be stored encrypted in Git
+  - apiGroups: ["bitnami.com"]
+    resources:
+      - sealedsecrets
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+
+  # Allow patching of poddisruptionbudgets if present
+  - apiGroups: ["policy"]
+    resources:
+      - poddisruptionbudgets
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ci-deploy-binding
+  namespace: default
+  labels:
+    app.kubernetes.io/name: ci-deploy-binding
+subjects:
+  - kind: ServiceAccount
+    name: ci-deployer
+    namespace: default
+roleRef:
+  kind: Role
+  name: ci-deploy-role
+  apiGroup: rbac.authorization.k8s.io

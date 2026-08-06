@@ -1,0 +1,44 @@
+# allow-dns.yaml
+# Allow pods in the 'default' namespace to perform DNS queries (UDP/TCP 53).
+# This policy permits egress to the cluster DNS service (typically in kube-system)
+# and to public DNS servers as a fallback (e.g., 8.8.8.8). Adjust IPs if your DNS service
+# uses a different ClusterIP or namespace.
+#
+# Apply with:
+#   kubectl apply -f infrastructure/network-policies/allow-dns.yaml
+#
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: default
+  labels:
+    policy.k8s.io/managed-by: network-policies
+spec:
+  podSelector: {}                # Applies to all pods in 'default' namespace
+  policyTypes:
+    - Egress
+  egress:
+    # Allow egress to DNS service in kube-system namespace (Cluster DNS)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+        - podSelector: {}        # any pod in kube-system (CoreDNS)
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+    # Allow egress to public DNS servers as fallback (Google DNS)
+    - to:
+        - ipBlock:
+            cidr: 8.8.8.8/32
+        - ipBlock:
+            cidr: 8.8.4.4/32
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

@@ -1,0 +1,34 @@
+# allow-frontend-backend.yaml
+# Allow only frontend pods to initiate connections to backend pods on TCP/8080.
+# This policy is scoped to the 'default' namespace and targets backend pods by label.
+#
+# Important:
+# - The frontend Deployment template sets label: app: frontend-frontend
+# - The backend Deployment template sets label: app: backend-backend
+#
+# Apply with:
+#   kubectl apply -f infrastructure/network-policies/allow-frontend-backend.yaml
+#
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-frontend-to-backend
+  namespace: default
+  labels:
+    policy.k8s.io/managed-by: network-policies
+spec:
+  podSelector:
+    matchLabels:
+      app: backend-backend
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # Allow pods with label app=frontend-frontend in the same namespace
+        - podSelector:
+            matchLabels:
+              app: frontend-frontend
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Note: No other ingress rules -> all other ingress to backend pods is denied by default-deny
