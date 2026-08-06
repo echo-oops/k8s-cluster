@@ -1,0 +1,265 @@
+# File: ansible/roles/common/tasks/main.yml
+---
+# tasks file for ansible role: common
+# Prepares Ubuntu 22.04 hosts for Kubernetes installation and general use.
+# Idempotent tasks: update apt, install base packages, disable swap, sysctl, install Docker (optional),
+# create admin user, configure SSH keys, configure timezone, enable basic firewall rules.
+
+- name: Validate supported OS
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] == "Debian"
+      - "'Ubuntu' in ansible_facts['distribution']"
+    fail_msg: "This role supports Ubuntu 22.04 (Debian family) only."
+    success_msg: "OS check passed."
+
+- name: Ensure apt cache is up to date
+  ansible.builtin.apt:
+    update_cache: yes
+    cache_valid_time: 3600
+
+- name: Ensure required base packages are installed
+  ansible.builtin.apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+      - software-properties-common
+      - unzip
+      - jq
+      - net-tools
+      - iproute2
+      - iputils-ping
+    state: present
+    update_cache: no
+
+- name: Ensure timezone is configured
+  ansible.builtin.timezone:
+    name: "{{ timezone | default('UTC') }}"
+
+- name: Ensure admin user exists
+  ansible.builtin.user:
+    name: "{{ common_user | default('ubuntu') }}"
+    comment: "Kubernetes admin user"
+    groups: sudo
+    shell: /bin/bash
+    create_home: yes
+    state: present
+    password: "{{ common_user_password | default(omit) }}"
+  when: common_user is defined
+
+- name: Ensure .ssh directory exists for admin user
+  ansible.builtin.file:
+    path: "/home/{{ common_user | default('ubuntu') }}/.ssh"
+    state: directory
+    owner: "{{ common_user | default('ubuntu') }}"
+    group: "{{ common_user | default('ubuntu') }}"
+    mode: '0700'
+  when: common_user is defined
+
+- name: Install authorized SSH keys for admin user
+  ansible.builtin.authorized_key:
+    user: "{{ common_user | default('ubuntu') }}"
+    state: present
+    key: "{{ item }}"
+  loop: "{{ common_ssh_authorized_keys | default([]) }}"
+  when:
+    - common_user is defined
+    - common_ssh_authorized_keys is defined
+    - common_ssh_authorized_keys | length > 0
+
+- name: Disable swap immediately
+  ansible.builtin.command: swapoff -a
+  register: swapoff_result
+  changed_when: swapoff_result.rc == 0
+  failed_when: false
+
+- name: Ensure swap entries are commented out in /etc/fstab
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '(^.*\sswap\s.*$)'
+    replace: '# \\1'
+    backup: yes
+  when: swapoff_result is defined
+
+- name: Ensure br_netfilter module is loaded
+  ansible.builtin.modprobe:
+    name: br_netfilter
+    state: present
+
+- name: Persist br_netfilter in modules-load
+  ansible.builtin.lineinfile:
+    path: /etc/modules-load.d/k8s.conf
+    line: br_netfilter
+    create: yes
+    state: present
+
+- name: Apply recommended sysctl settings for Kubernetes
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-kubernetes.conf
+    content: |
+      net.bridge.bridge-nf-call-iptables = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+      net.ipv4.ip_forward = 1
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload systemd
+
+- name: Reload sysctl settings
+  ansible.builtin.command: sysctl --system
+  changed_when: false
+
+- name: Ensure UFW is installed
+  ansible.builtin.apt:
+    name: ufw
+    state: present
+
+- name: Allow SSH through UFW
+  ansible.builtin.ufw:
+    rule: allow
+    name: OpenSSH
+
+- name: Allow ICMP (ping) through UFW
+  ansible.builtin.ufw:
+    rule: allow
+    proto: icmp
+
+- name: Enable UFW (if not enabled)
+  ansible.builtin.command: ufw --force enable
+  register: ufw_enable
+  changed_when: "'active' not in ufw_enable.stdout"
+  failed_when: false
+
+- name: Add Docker apt repository GPG key
+  ansible.builtin.apt_key:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    state: present
+
+- name: Add Docker apt repository
+  ansible.builtin.apt_repository:
+    repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_lsb.codename }} stable"
+    state: present
+    filename: docker
+
+- name: Update apt cache after adding Docker repo
+  ansible.builtin.apt:
+    update_cache: yes
+
+- name: Install Docker CE (container runtime) when requested
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+    state: present
+  when: install_docker | default(true)
+
+- name: Ensure docker group exists
+  ansible.builtin.group:
+    name: docker
+    state: present
+  when: install_docker | default(true)
+
+- name: Add admin user to docker group
+  ansible.builtin.user:
+    name: "{{ common_user | default('ubuntu') }}"
+    groups: docker
+    append: yes
+  when:
+    - install_docker | default(true)
+    - common_user is defined
+
+- name: Create Docker daemon.json with recommended settings
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    content: |
+      {
+        "exec-opts": ["native.cgroupdriver=systemd"],
+        "log-driver": "json-file",
+        "log-opts": {
+          "max-size": "10m",
+          "max-file": "3"
+        },
+        "storage-driver": "overlay2"
+      }
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart docker
+  when: install_docker | default(true)
+
+- name: Ensure containerd config exists and set SystemdCgroup true
+  ansible.builtin.command: containerd config default
+  register: containerd_default
+  changed_when: false
+  when: install_docker | default(true)
+
+- name: Write containerd config with systemd cgroup enabled
+  ansible.builtin.copy:
+    dest: /etc/containerd/config.toml
+    content: "{{ containerd_default.stdout | default('') | regex_replace('SystemdCgroup = false','SystemdCgroup = true') }}"
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart containerd
+  when: install_docker | default(true)
+
+- name: Ensure docker service is enabled and started
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: yes
+  when: install_docker | default(true)
+
+- name: Ensure containerd service is enabled and started
+  ansible.builtin.service:
+    name: containerd
+    state: started
+    enabled: yes
+  when: install_docker | default(true)
+
+- name: Configure unattended-upgrades to keep system secure
+  ansible.builtin.apt:
+    name:
+      - unattended-upgrades
+    state: present
+
+- name: Ensure unattended-upgrades is enabled
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Create helper directory for admin user
+  ansible.builtin.file:
+    path: "/home/{{ common_user | default('ubuntu') }}/bin"
+    state: directory
+    owner: "{{ common_user | default('ubuntu') }}"
+    group: "{{ common_user | default('ubuntu') }}"
+    mode: '0755'
+  when: common_user is defined
+
+- name: Ensure motd banner is informative
+  ansible.builtin.copy:
+    dest: /etc/motd
+    content: |
+      Welcome to the Kubernetes node.
+      Managed by Ansible role: common
+      Hostname: {{ inventory_hostname }}
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Clean apt cache
+  ansible.builtin.apt:
+    autoclean: yes
+    autoremove: yes
+
+# End of common tasks

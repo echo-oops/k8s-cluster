@@ -1,0 +1,213 @@
+# File: ansible/roles/calico/tasks/main.yml
+---
+# tasks file for ansible role: calico
+# Устанавливает Calico CNI в кластер Kubernetes.
+# Поддерживает два метода установки:
+#  - manifest (по умолчанию) — kubectl apply -f <manifest_url>
+#  - helm                 — helm upgrade --install <chart>
+#
+# Переменные (можно переопределить в playbook / inventory):
+#  calico_install_method: "manifest" | "helm"
+#  calico_manifest_url: URL манифеста Calico (используется при manifest)
+#  calico_namespace: namespace для Calico (по умолчанию calico-system)
+#  calico_helm_repo: URL helm-репозитория (по умолчанию https://projectcalico.docs.tigera.io/charts)
+#  calico_helm_chart: имя чарта (по умолчанию tigera-operator/tigera-operator)
+#  calico_helm_version: версия чарта (опционально)
+#  calico_helm_values: путь к файлу values.yaml (опционально, локальный путь в контроллере Ansible)
+#  kubeconfig: путь к kubeconfig для доступа к кластеру (если не задан, используется /etc/kubernetes/admin.conf на control-plane)
+#
+# Установка выполняется только на control-plane узле (is_control_plane: true).
+# Задачи idempotent: повторный запуск не приведёт к дублированию ресурсов.
+
+- name: Ensure this role runs only on control-plane
+  ansible.builtin.assert:
+    that:
+      - is_control_plane | bool
+    fail_msg: "Calico should be installed from control-plane only (set is_control_plane: true for the host running this role)."
+    success_msg: "Running Calico installation on control-plane host."
+
+- name: Set default variables for Calico installation
+  ansible.builtin.set_fact:
+    calico_install_method: "{{ calico_install_method | default('manifest') }}"
+    calico_manifest_url: "{{ calico_manifest_url | default('https://docs.projectcalico.org/manifests/calico.yaml') }}"
+    calico_namespace: "{{ calico_namespace | default('calico-system') }}"
+    calico_helm_repo: "{{ calico_helm_repo | default('https://projectcalico.docs.tigera.io/charts') }}"
+    calico_helm_chart: "{{ calico_helm_chart | default('tigera-operator/tigera-operator') }}"
+    calico_kubeconfig: "{{ kubeconfig | default(kubeconfig_dest | default('/etc/kubernetes/admin.conf')) }}"
+
+- name: Ensure kubectl is available
+  ansible.builtin.command: kubectl version --client --short
+  register: kubectl_check
+  failed_when: kubectl_check.rc != 0
+  changed_when: false
+
+- name: Ensure calico namespace exists (idempotent)
+  ansible.builtin.command: >
+    kubectl --kubeconfig {{ calico_kubeconfig }} get namespace {{ calico_namespace }} --ignore-not-found
+  register: calico_ns_check
+  changed_when: false
+
+- name: Create calico namespace if missing
+  ansible.builtin.command: >
+    kubectl --kubeconfig {{ calico_kubeconfig }} create namespace {{ calico_namespace }}
+  when: calico_ns_check.stdout == ""
+  register: calico_ns_create
+  changed_when: calico_ns_create.rc == 0
+
+- name: Install Calico using manifest (kubectl apply)
+  ansible.builtin.block:
+    - name: Download Calico manifest to temporary file
+      ansible.builtin.get_url:
+        url: "{{ calico_manifest_url }}"
+        dest: "/tmp/calico-manifest-{{ inventory_hostname }}.yaml"
+        mode: '0644'
+        force: yes
+
+    - name: Apply Calico manifest
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ calico_kubeconfig }} apply -f /tmp/calico-manifest-{{ inventory_hostname }}.yaml
+      register: calico_apply
+      changed_when: "'configured' in calico_apply.stdout or calico_apply.rc == 0"
+
+    - name: Remove temporary manifest file
+      ansible.builtin.file:
+        path: "/tmp/calico-manifest-{{ inventory_hostname }}.yaml"
+        state: absent
+  when: calico_install_method == 'manifest'
+
+- name: Install Calico using Helm
+  ansible.builtin.block:
+    - name: Ensure helm is installed on control-plane
+      ansible.builtin.command: helm version --short
+      register: helm_check
+      failed_when: helm_check.rc != 0
+      changed_when: false
+
+    - name: Add Calico Helm repo
+      ansible.builtin.command: >
+        helm repo add tigera {{ calico_helm_repo }} || true
+      register: helm_repo_add
+      changed_when: "'added' in helm_repo_add.stdout or helm_repo_add.rc == 0"
+
+    - name: Update Helm repos
+      ansible.builtin.command: helm repo update
+      changed_when: false
+
+    - name: Build helm install command
+      ansible.builtin.set_fact:
+        _calico_helm_cmd: >-
+          helm upgrade --install calico-operator {{ calico_helm_chart }}
+          --namespace {{ calico_namespace }} --create-namespace
+          {{ '--version ' + calico_helm_version if (calico_helm_version is defined and calico_helm_version|length > 0) else '' }}
+          {{ '--values ' + calico_helm_values if (calico_helm_values is defined and calico_helm_values|length > 0) else '' }}
+
+    - name: Run Helm install/upgrade for Calico
+      ansible.builtin.shell: "{{ _calico_helm_cmd }}"
+      args:
+        executable: /bin/bash
+      register: calico_helm_install
+      changed_when: calico_helm_install.rc == 0
+  when: calico_install_method == 'helm'
+
+- name: Wait for Calico pods to be ready (DaemonSet calico-node and operator)
+  ansible.builtin.block:
+    - name: Wait for calico-node daemonset to have desired number available
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ calico_kubeconfig }} -n {{ calico_namespace }} rollout status daemonset/calico-node --timeout=5m
+      register: calico_node_rollout
+      failed_when: calico_node_rollout.rc != 0
+
+    - name: Wait for tigera-operator deployment (if present) to be ready
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ calico_kubeconfig }} -n {{ calico_namespace }} rollout status deployment/tigera-operator --timeout=5m
+      register: tigera_operator_rollout
+      failed_when: tigera_operator_rollout.rc != 0
+      failed_when: false
+  rescue:
+    - name: Gather calico pods for debugging
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ calico_kubeconfig }} -n {{ calico_namespace }} get pods -o wide
+      register: calico_pods_debug
+      changed_when: false
+
+    - name: Fail with calico pods output
+      ansible.builtin.fail:
+        msg: "Calico pods did not become ready within timeout. Pods: {{ calico_pods_debug.stdout }}"
+
+- name: Verify Calico node status (check calicoctl if available or check node pods)
+  ansible.builtin.block:
+    - name: Check calico-node pods are Running
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ calico_kubeconfig }} -n {{ calico_namespace }} get pods -l k8s-app=calico-node -o jsonpath='{range .items[*]}{.metadata.name}:{.status.phase}{"\\n"}{end}'
+      register: calico_node_status
+      changed_when: false
+
+    - name: Fail if any calico-node pod is not Running
+      ansible.builtin.fail:
+        msg: "One or more calico-node pods are not Running: {{ calico_node_status.stdout_lines }}"
+      when: calico_node_status.stdout_lines | select('search', 'Running') | list | length != (calico_node_status.stdout_lines | length)
+  when: calico_install_method in ['manifest','helm']
+
+- name: Create recommended Calico ClusterRoleBinding for calico-node (if missing)
+  ansible.builtin.command: >
+    kubectl --kubeconfig {{ calico_kubeconfig }} get clusterrolebinding calico-node-binding --ignore-not-found
+  register: crb_check
+  changed_when: false
+
+- name: Apply minimal ClusterRoleBinding for calico-node (idempotent)
+  ansible.builtin.copy:
+    dest: /tmp/calico-clusterrolebinding-{{ inventory_hostname }}.yaml
+    content: |
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: calico-node-binding
+      subjects:
+        - kind: ServiceAccount
+          name: calico-node
+          namespace: {{ calico_namespace }}
+      roleRef:
+        kind: ClusterRole
+        name: calico-node
+        apiGroup: rbac.authorization.k8s.io
+    mode: '0644'
+  when: crb_check.stdout == ""
+
+- name: Apply calico clusterrolebinding manifest
+  ansible.builtin.command: >
+    kubectl --kubeconfig {{ calico_kubeconfig }} apply -f /tmp/calico-clusterrolebinding-{{ inventory_hostname }}.yaml
+  when: crb_check.stdout == ""
+  register: crb_apply
+  changed_when: crb_apply.rc == 0
+
+- name: Remove temporary clusterrolebinding file
+  ansible.builtin.file:
+    path: /tmp/calico-clusterrolebinding-{{ inventory_hostname }}.yaml
+    state: absent
+  when: crb_check.stdout == ""
+
+- name: Annotate nodes with calico-ready label (optional)
+  ansible.builtin.command: >
+    kubectl --kubeconfig {{ calico_kubeconfig }} get nodes -o name
+  register: nodes_list
+  changed_when: false
+
+- name: Label nodes as calico-ready
+  ansible.builtin.shell: |
+    for n in {{ nodes_list.stdout_lines | join(' ') }}; do
+      kubectl --kubeconfig {{ calico_kubeconfig }} label --overwrite $n network.calico.org/ready=true || true
+    done
+  when: nodes_list.stdout_lines | length > 0
+
+- name: Final check - list Calico resources
+  ansible.builtin.command: >
+    kubectl --kubeconfig {{ calico_kubeconfig }} -n {{ calico_namespace }} get all
+  register: calico_final
+  changed_when: false
+
+- name: Display Calico installation summary
+  ansible.builtin.debug:
+    msg: |
+      Calico installation method: {{ calico_install_method }}
+      Namespace: {{ calico_namespace }}
+      Pods: {{ calico_final.stdout }}

@@ -1,0 +1,39 @@
+# File: ansible/inventory.yml
+all:
+  vars:
+    ansible_user: ubuntu
+    ansible_ssh_private_key_file: ~/.ssh/id_rsa
+    # Global cluster variables (can be overridden per-group or per-host)
+    k8s_version: "1.28.2"
+    pod_network_cidr: "10.244.0.0/16"
+    service_cidr: "10.96.0.0/12"
+    control_plane_endpoint: "k8s.example.com:6443"
+    install_helm: true
+    ci_deployer_create: true
+    # Calico settings
+    calico_install_method: "manifest"
+    calico_manifest_url: "https://docs.projectcalico.org/manifests/calico.yaml"
+  children:
+    masters:
+      hosts:
+        master-01.example.com:
+          ansible_host: 10.0.0.10
+          # If you need to override user per-host:
+          # ansible_user: ubuntu
+        master-02.example.com:
+          ansible_host: 10.0.0.11
+        master-03.example.com:
+          ansible_host: 10.0.0.12
+    workers:
+      hosts:
+        worker-01.example.com:
+          ansible_host: 10.0.0.20
+        worker-02.example.com:
+          ansible_host: 10.0.0.21
+        worker-03.example.com:
+          ansible_host: 10.0.0.22
+    # Optional group for bastion/jump host if you use ProxyCommand
+    bastion:
+      hosts:
+        bastion.example.com:
+          ansible_host: 10.0.0.5
