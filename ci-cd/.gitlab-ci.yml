@@ -1,0 +1,182 @@
+# .gitlab-ci.yml
+# GitLab CI pipeline for building Docker images, pushing to registry and deploying Helm charts.
+# - Uses Kaniko for secure, rootless image builds in CI (no Docker-in-Docker required).
+# - Deploys to Kubernetes via Helm using a kubeconfig stored in CI/CD variables (KUBE_CONFIG_DATA).
+# - Stages: build -> test -> push -> deploy:staging -> deploy:production (manual).
+#
+# Required GitLab CI/CD variables (set in project/group settings, protected where appropriate):
+#   CI_REGISTRY             - GitLab registry URL (provided by GitLab)
+#   CI_REGISTRY_USER        - registry username (provided by GitLab)
+#   CI_REGISTRY_PASSWORD    - registry password (provided by GitLab)
+#   KUBE_CONFIG_DATA        - base64-encoded kubeconfig for a ServiceAccount with limited rights (ci-deployer)
+#   HELM_REPOSITORY_USER    - optional, if using private helm repo
+#   HELM_REPOSITORY_PASSWORD- optional
+#
+# Secrets and tokens must be masked and protected in GitLab settings.
+#
+stages:
+  - build
+  - test
+  - push
+  - deploy
+
+variables:
+  # Image name prefix (GitLab provides CI_REGISTRY and CI_PROJECT_PATH)
+  IMAGE_PREFIX: "$CI_REGISTRY_IMAGE"
+  # Short SHA for tagging
+  IMAGE_TAG: "$CI_COMMIT_SHORT_SHA"
+  # Helm releases and namespaces
+  KUBE_NAMESPACE: "default"
+  HELM_RELEASE_FRONTEND: "frontend"
+  HELM_RELEASE_BACKEND: "backend"
+  # Kaniko cache (optional) - requires a writable cache registry or GCS/S3; left disabled by default
+  DOCKER_CONFIG: /kaniko/.docker
+
+.default-job: &default-job
+  image: alpine:3.18
+  before_script:
+    - apk add --no-cache bash ca-certificates curl git openssh-client
+    - export KUBECONFIG="$CI_PROJECT_DIR/kubeconfig"
+    # If KUBE_CONFIG_DATA is provided, decode it into kubeconfig file for helm/kubectl usage
+    - if [ -n "${KUBE_CONFIG_DATA:-}" ]; then echo "$KUBE_CONFIG_DATA" | base64 -d > "$KUBECONFIG"; chmod 600 "$KUBECONFIG"; fi
+
+# Build stage: build artifacts, run unit tests (if any)
+build:
+  stage: build
+  image: golang:1.20-alpine
+  script:
+    - echo "Build stage: compile or prepare artifacts if needed"
+    - |
+      if [ -f ./Makefile ]; then
+        make build || true
+      else
+        echo "No Makefile build step defined; skipping compile"
+      fi
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1h
+  only:
+    - branches
+    - merge_requests
+
+# Test stage: run unit tests and linting
+test:
+  stage: test
+  image: node:20-alpine
+  script:
+    - echo "Running tests (placeholder). Add your test commands here."
+    - |
+      if [ -f package.json ]; then
+        npm ci
+        npm test || true
+      else
+        echo "No JS tests configured"
+      fi
+  only:
+    - branches
+    - merge_requests
+
+# Push stage: build Docker image with Kaniko and push to registry
+push:
+  stage: push
+  image:
+    name: gcr.io/kaniko-project/executor:latest
+    entrypoint: [""]
+  variables:
+    # Kaniko will read Docker credentials from /kaniko/.docker/config.json
+    DOCKER_CONFIG: /kaniko/.docker
+  before_script:
+    - mkdir -p /kaniko/.docker
+    - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"$CI_REGISTRY_USER\",\"password\":\"$CI_REGISTRY_PASSWORD\"}}}" > /kaniko/.docker/config.json
+  script:
+    - echo "Building and pushing image with Kaniko: ${IMAGE_PREFIX}:${IMAGE_TAG}"
+    - /kaniko/executor --context $CI_PROJECT_DIR --dockerfile $CI_PROJECT_DIR/Dockerfile --destination ${IMAGE_PREFIX}:${IMAGE_TAG} --cache=true --cache-repo ${IMAGE_PREFIX}/cache || exit 1
+    - /kaniko/executor --context $CI_PROJECT_DIR --dockerfile $CI_PROJECT_DIR/Dockerfile --destination ${IMAGE_PREFIX}:latest --cache=true --cache-repo ${IMAGE_PREFIX}/cache || true
+  only:
+    - branches
+    - merge_requests
+  artifacts:
+    expire_in: 1h
+    reports:
+      dotenv: .image.env
+  after_script:
+    - echo "IMAGE=${IMAGE_PREFIX}:${IMAGE_TAG}" > .image.env
+
+# Deploy to staging automatically on develop branch
+deploy_staging:
+  stage: deploy
+  image:
+    name: alpine/helm:3.12.0
+    entrypoint: [""]
+  dependencies:
+    - push
+  before_script:
+    - apk add --no-cache bash curl ca-certificates git openssh-client
+    - export KUBECONFIG="$CI_PROJECT_DIR/kubeconfig"
+    - if [ -n "${KUBE_CONFIG_DATA:-}" ]; then echo "$KUBE_CONFIG_DATA" | base64 -d > "$KUBECONFIG"; chmod 600 "$KUBECONFIG"; fi
+    - helm version
+    - helm repo add stable https://charts.helm.sh/stable || true
+    - helm repo update
+  script:
+    - echo "Deploy backend to staging"
+    - helm upgrade --install "$HELM_RELEASE_BACKEND" helm-charts/backend \
+        --namespace "$KUBE_NAMESPACE" --create-namespace \
+        --set image.repository="${IMAGE_PREFIX}" \
+        --set image.tag="${IMAGE_TAG}" \
+        --wait --timeout 5m
+    - echo "Deploy frontend to staging"
+    - helm upgrade --install "$HELM_RELEASE_FRONTEND" helm-charts/frontend \
+        --namespace "$KUBE_NAMESPACE" --create-namespace \
+        --set image.repository="${IMAGE_PREFIX}" \
+        --set image.tag="${IMAGE_TAG}" \
+        --wait --timeout 5m
+  environment:
+    name: staging
+    url: http://staging.example.com
+  only:
+    - develop
+
+# Deploy to production: manual approval required
+deploy_production:
+  stage: deploy
+  image:
+    name: alpine/helm:3.12.0
+    entrypoint: [""]
+  when: manual
+  before_script:
+    - apk add --no-cache bash curl ca-certificates git openssh-client
+    - export KUBECONFIG="$CI_PROJECT_DIR/kubeconfig"
+    - if [ -n "${KUBE_CONFIG_DATA:-}" ]; then echo "$KUBE_CONFIG_DATA" | base64 -d > "$KUBECONFIG"; chmod 600 "$KUBECONFIG"; fi
+    - helm version
+    - helm repo update
+  script:
+    - echo "Deploy backend to production"
+    - helm upgrade --install "$HELM_RELEASE_BACKEND" helm-charts/backend \
+        --namespace "$KUBE_NAMESPACE" --create-namespace \
+        --set image.repository="${IMAGE_PREFIX}" \
+        --set image.tag="${IMAGE_TAG}" \
+        --values helm-charts/backend/values-prod.yaml \
+        --wait --timeout 10m
+    - echo "Deploy frontend to production"
+    - helm upgrade --install "$HELM_RELEASE_FRONTEND" helm-charts/frontend \
+        --namespace "$KUBE_NAMESPACE" --create-namespace \
+        --set image.repository="${IMAGE_PREFIX}" \
+        --set image.tag="${IMAGE_TAG}" \
+        --values helm-charts/frontend/values-prod.yaml \
+        --wait --timeout 10m
+  environment:
+    name: production
+    url: https://frontend.example.com
+  only:
+    - main
+
+# Cleanup job (optional): remove dangling images or temporary artifacts
+cleanup:
+  stage: push
+  image: alpine:3.18
+  script:
+    - echo "Cleanup placeholder - implement registry cleanup via scheduled job or external tool"
+  when: manual
+  only:
+    - schedules

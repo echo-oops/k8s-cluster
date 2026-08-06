@@ -1,0 +1,103 @@
+# File: ansible/roles/kubernetes/templates/cloud-init.yaml.j2
+#cloud-config
+# Cloud-init template for provisioning Ubuntu 22.04 nodes for Kubernetes (kubeadm + containerd)
+# Variables expected from Ansible:
+#   - kube_user (string)
+#   - ssh_authorized_key (string)  -> public key content
+#   - timezone (optional, default: UTC)
+#   - disable_swap (optional, default: true)
+# This cloud-init is safe to run on first boot and will prepare the node for Ansible playbooks.
+
+timezone: "{{ timezone | default('UTC') }}"
+package_update: true
+package_upgrade: false
+packages:
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - gnupg
+  - lsb-release
+  - software-properties-common
+  - jq
+
+users:
+  - name: "{{ kube_user }}"
+    gecos: "Kubernetes Admin"
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    groups: sudo
+    shell: /bin/bash
+    lock_passwd: false
+    ssh_authorized_keys:
+      - "{{ ssh_authorized_key }}"
+
+write_files:
+  - path: /etc/sysctl.d/99-kubernetes.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      net.bridge.bridge-nf-call-iptables = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+      net.ipv4.ip_forward = 1
+
+  - path: /etc/modules-load.d/k8s.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      br_netfilter
+
+  - path: /etc/containerd/config.toml
+    owner: root:root
+    permissions: '0644'
+    content: |
+      # Minimal containerd config to ensure systemd cgroup driver and overlayfs snapshotter
+      version = 2
+      [plugins."io.containerd.grpc.v1.cri".containerd]
+        snapshotter = "overlayfs"
+        default_runtime_name = "runc"
+      [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+        runtime_type = "io.containerd.runc.v2"
+        [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+          SystemdCgroup = true
+
+runcmd:
+  # Ensure br_netfilter module is loaded
+  - modprobe br_netfilter || true
+  - sysctl --system || true
+
+  # Disable swap immediately and persistently if requested
+  - |
+    if [ "{{ disable_swap | default(true) | ternary('true','false') }}" = "true" ]; then
+      swapoff -a || true
+      sed -i.bak -r 's/(.+\s+swap\s+.+)/#\1/g' /etc/fstab || true
+    fi
+
+  # Install containerd from Docker repository (stable)
+  - |
+    set -eux
+    ARCH=$(dpkg --print-architecture)
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+    echo "deb [arch=${ARCH} signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu {{ ansible_lsb.codename }} stable" > /etc/apt/sources.list.d/docker.list
+    apt-get update
+    apt-get install -y containerd.io
+
+  # Ensure containerd config exists and restart service
+  - |
+    if [ ! -f /etc/containerd/config.toml ]; then
+      containerd config default > /etc/containerd/config.toml || true
+    fi
+    # Ensure systemd cgroup is enabled
+    sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml || true
+    systemctl enable --now containerd
+
+  # Install kubeadm, kubelet, kubectl
+  - |
+    curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/k8s-archive-keyring.gpg
+    echo "deb [signed-by=/usr/share/keyrings/k8s-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" > /etc/apt/sources.list.d/kubernetes.list
+    apt-get update
+    apt-get install -y kubelet kubeadm kubectl
+    apt-mark hold kubelet kubeadm kubectl
+
+  # Enable and start kubelet (it will wait until kubeadm init/join runs)
+  - systemctl enable --now kubelet
+
+final_message: "Cloud-init finished. Node prepared for Ansible Kubernetes role."

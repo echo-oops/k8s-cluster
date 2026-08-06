@@ -1,0 +1,27 @@
+{{- /*
+Service exposing backend application and metrics.
+Service selector matches app label used in Deployment to align with NetworkPolicy rules.
+*/ -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "backend.fullname" . }}
+  labels:
+    {{ include "backend.labels" . | nindent 4 }}
+  annotations:
+    {{- with .Values.service.annotations }}
+    {{ toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  type: {{ .Values.service.type | default "ClusterIP" }}
+  selector:
+    app: {{ include "backend.fullname" . }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port | default 8080 }}
+      targetPort: {{ .Values.service.targetPort | default 8080 }}
+      protocol: TCP
+    - name: metrics
+      port: {{ .Values.service.metricsPort | default 9100 }}
+      targetPort: {{ .Values.service.metricsPort | default 9100 }}
+      protocol: TCP

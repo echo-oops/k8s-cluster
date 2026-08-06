@@ -1,52 +1,61 @@
 # values.yaml (development / default)
-# Realistic, ready-to-use defaults for local/staging environments.
-# Override image.repository and image.tag in CI/CD pipeline.
+# Sensible defaults for local or staging environments.
+# CI/CD should override image.tag with commit SHA.
 
 replicaCount: 2
 
 image:
-  repository: registry.example.com/project/backend
+  repository: registry.example.com/project/frontend
   tag: "latest"
   pullPolicy: IfNotPresent
-  # imagePullSecrets: [] # e.g. ["regcred"] - set in values or via --set
 
 service:
   type: ClusterIP
-  port: 8080
+  port: 80
   targetPort: 8080
-  # Expose a separate metrics port for Prometheus scraping if needed
-  metricsPort: 9100
   annotations: {}
+
+ingress:
+  enabled: true
+  ingressClassName: nginx
+  hosts:
+    - host: frontend.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/proxy-body-size: "8m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
 
 resources:
   requests:
-    cpu: 150m
-    memory: 192Mi
+    cpu: 100m
+    memory: 128Mi
   limits:
-    cpu: 300m
-    memory: 384Mi
+    cpu: 200m
+    memory: 256Mi
 
 autoscaling:
   enabled: false
   minReplicas: 2
-  maxReplicas: 5
+  maxReplicas: 6
   targetCPUUtilizationPercentage: 60
 
-# Environment variables passed to the container (can be overridden)
 env:
-  - name: DATABASE_URL
-    value: "postgres://db.default.svc.cluster.local:5432/appdb"
+  - name: BACKEND_URL
+    value: "http://backend.default.svc.cluster.local:8080"
   - name: LOG_LEVEL
     value: "info"
-  - name: METRICS_ENABLED
-    value: "true"
+  - name: FEATURE_FLAG_UI
+    value: "false"
 
-# ConfigMap entries (application config)
 config:
-  APP_ENV: "development"
-  FEATURE_FLAG_EXAMPLE: "false"
+  UI_THEME: "light"
+  WELCOME_MESSAGE: "Welcome to the demo frontend"
 
-# Probes
 readinessProbe:
   httpGet:
     path: /health
@@ -67,11 +76,10 @@ livenessProbe:
   failureThreshold: 5
   successThreshold: 1
 
-# Pod security and runtime constraints
 podSecurityContext:
-  runAsUser: 1001
-  runAsGroup: 2001
-  fsGroup: 2001
+  runAsUser: 1000
+  runAsGroup: 2000
+  fsGroup: 2000
 
 securityContext:
   allowPrivilegeEscalation: false
@@ -80,77 +88,36 @@ securityContext:
     drop:
       - ALL
 
-# ServiceAccount settings
 serviceAccount:
   create: true
-  name: backend-sa
+  name: frontend-sa
   annotations: {}
 
-# Network policy labels (used by infrastructure/network-policies)
 podLabels:
-  app.kubernetes.io/name: backend
-  app.kubernetes.io/instance: backend
+  app.kubernetes.io/name: frontend
+  app.kubernetes.io/instance: frontend
 
-# Ingress configuration (optional)
-ingress:
-  enabled: false
-  ingressClassName: nginx
-  hosts:
-    - host: backend.local
-      paths:
-        - path: /
-          pathType: Prefix
-  tls: [] # - secretName: backend-tls; hosts: [backend.example.com]
-  annotations:
-    kubernetes.io/ingress.class: nginx
-
-# ServiceMonitor configuration for Prometheus (kube-prometheus-stack)
-serviceMonitor:
-  enabled: true
-  namespace: monitoring
-  interval: 15s
-  scrapeTimeout: 10s
-  metricRelabelings: []
-  relabelings: []
-  # The ServiceMonitor will select the service by labels below
-  selector:
-    matchLabels:
-      app: backend-backend
-
-# Pod affinity/anti-affinity and tolerations (sensible defaults)
-affinity: {}
-tolerations: []
-
-# Horizontal Pod Disruption Budget (optional)
-pdb:
-  enabled: false
-  minAvailable: 1
-
-# Extra volumes and mounts (for secrets, config, certificates)
-extraVolumes: []
-extraVolumeMounts: []
-
-# Annotations to add to pods
-podAnnotations: {}
-
-# Extra args for the container command
-extraArgs: []
-
-# Liveness/readiness initial backoff for slow-starting apps
-startupProbe: null
-
-# Enable metrics endpoint (application must expose /metrics)
 metrics:
   enabled: true
   path: /metrics
   port: 9100
 
-# SealedSecrets or external secrets integration
-# If using SealedSecrets, create a SealedSecret named backend-db-secret in the same namespace
+affinity: {}
+tolerations: []
+
+pdb:
+  enabled: false
+  minAvailable: 1
+
+extraVolumes: []
+extraVolumeMounts: []
+
+podAnnotations: {}
+
 secrets:
   useSealedSecrets: true
-  sealedSecretName: backend-db-credentials
+  sealedSecretName: frontend-api-credentials
 
 # Notes:
-# - For production, override image.tag with CI_COMMIT_SHORT_SHA or release tag.
-# - Use values-prod.yaml for production overrides (replica count, resources, persistence).
+# - For production override image.tag and increase resources/replicas.
+# - Use SealedSecrets to store any sensitive values referenced by the chart.

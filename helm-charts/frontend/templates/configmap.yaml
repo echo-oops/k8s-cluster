@@ -1,18 +1,15 @@
-{{- /*
-ConfigMap for backend application configuration.
-Values are taken from .Values.config map.
-*/ -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "backend.fullname" . }}-config
+  name: {{ include "frontend.fullname" . }}-config
   labels:
-    {{ include "backend.labels" . | nindent 4 }}
+    {{ include "frontend.labels" . | nindent 4 }}
 data:
 {{- if .Values.config }}
 {{- range $k, $v := .Values.config }}
   {{ $k }}: {{ $v | quote }}
 {{- end }}
 {{- else }}
-  APP_ENV: {{ default "production" .Values.config.APP_ENV | quote }}
+  UI_THEME: "light"
+  WELCOME_MESSAGE: "Welcome to the demo frontend"
 {{- end }}

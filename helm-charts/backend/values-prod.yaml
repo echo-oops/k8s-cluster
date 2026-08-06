@@ -1,0 +1,116 @@
+# values-prod.yaml
+# Production overrides for the backend chart.
+# Intended to be passed with: helm upgrade --install backend ./helm-charts/backend -f helm-charts/backend/values-prod.yaml
+
+replicaCount: 4
+
+image:
+  repository: registry.example.com/project/backend
+  # CI should set the exact tag, e.g. --set image.tag=$CI_COMMIT_SHORT_SHA
+  tag: "stable"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8080
+  targetPort: 8080
+  metricsPort: 9100
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 60
+
+env:
+  - name: DATABASE_URL
+    value: "postgres://db.prod.svc.cluster.local:5432/appdb"
+  - name: LOG_LEVEL
+    value: "warn"
+  - name: METRICS_ENABLED
+    value: "true"
+
+config:
+  APP_ENV: "production"
+  FEATURE_FLAG_EXAMPLE: "true"
+
+readinessProbe:
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 5
+
+livenessProbe:
+  initialDelaySeconds: 30
+  periodSeconds: 20
+  timeoutSeconds: 5
+  failureThreshold: 5
+
+podSecurityContext:
+  runAsUser: 1001
+  runAsGroup: 2001
+  fsGroup: 2001
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+serviceAccount:
+  create: true
+  name: backend-sa
+
+ingress:
+  enabled: true
+  ingressClassName: nginx
+  hosts:
+    - host: backend.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: backend-tls
+      hosts:
+        - backend.example.com
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+
+serviceMonitor:
+  enabled: true
+  namespace: monitoring
+  interval: 15s
+  scrapeTimeout: 10s
+  selector:
+    matchLabels:
+      app: backend-backend
+
+pdb:
+  enabled: true
+  minAvailable: 2
+
+metrics:
+  enabled: true
+  path: /metrics
+  port: 9100
+
+# Production secrets: use SealedSecrets or external secrets operator
+secrets:
+  useSealedSecrets: true
+  sealedSecretName: backend-db-credentials
+
+# Notes:
+# - In CI/CD pipeline, set image.tag to the commit SHA:
+#     helm upgrade --install backend ./helm-charts/backend --set image.tag=$CI_COMMIT_SHORT_SHA -n default
+# - Ensure TLS secret backend-tls exists in the namespace (created via cert-manager or manually).
+# - Tune resources and HPA thresholds according to load testing results.

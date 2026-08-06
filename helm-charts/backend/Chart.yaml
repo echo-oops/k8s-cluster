@@ -1,0 +1,17 @@
+apiVersion: v2
+name: backend
+description: "Backend microservice Helm chart — demo service with metrics, readiness/liveness probes and RBAC-friendly defaults"
+type: application
+version: 0.2.0
+appVersion: "1.0.0"
+keywords:
+  - backend
+  - microservice
+  - demo
+maintainers:
+  - name: "DevOps Team"
+    email: "devops@example.com"
+icon: "https://raw.githubusercontent.com/helm/charts/main/docs/chart_template_files/logo.png"
+home: "https://example.com/project/backend"
+sources:
+  - "https://github.com/example-org/backend"

@@ -1,0 +1,47 @@
+# File: ansible/roles/common/handlers/main.yml
+---
+# Handlers for common role
+# These handlers are triggered by tasks in the common role to restart services
+# or reload systemd after configuration changes.
+
+- name: Reload systemd
+  ansible.builtin.command: systemctl daemon-reload
+  become: true
+  changed_when: false
+
+- name: Restart containerd
+  ansible.builtin.service:
+    name: containerd
+    state: restarted
+    enabled: yes
+  become: true
+
+- name: Restart docker
+  ansible.builtin.service:
+    name: docker
+    state: restarted
+    enabled: yes
+  become: true
+
+- name: Restart kubelet
+  ansible.builtin.service:
+    name: kubelet
+    state: restarted
+    enabled: yes
+  become: true
+
+- name: Restart networking
+  ansible.builtin.service:
+    name: systemd-networkd
+    state: restarted
+    enabled: yes
+  become: true
+  when: ansible_facts.services is defined and ('systemd-networkd' in ansible_facts.services)
+
+- name: Restart NetworkManager
+  ansible.builtin.service:
+    name: NetworkManager
+    state: restarted
+    enabled: yes
+  become: true
+  when: ansible_facts.services is defined and ('NetworkManager' in ansible_facts.services)

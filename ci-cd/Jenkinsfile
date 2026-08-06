@@ -1,0 +1,153 @@
+// Jenkinsfile
+// Declarative Jenkins pipeline for building, testing, pushing Docker images and deploying Helm charts.
+// Assumes Jenkins has:
+//  - Credentials: 'registry-credentials' (username/password) for container registry
+//  - Credentials: 'kubeconfig-credentials' (Secret File) containing kubeconfig for deployment
+//  - Dockerfile at repo root and helm-charts/ directory with charts
+//  - Optional: Kubernetes plugin and Helm installed on agent
+//
+// Usage:
+//  - Create a multibranch pipeline job pointing to this repository.
+//  - Configure credentials IDs as used below or update them accordingly.
+
+pipeline {
+  agent any
+
+  environment {
+    REGISTRY_CREDENTIALS = 'registry-credentials'   // Jenkins credentials ID for registry (username/password)
+    KUBECONFIG_CREDENTIALS = 'kubeconfig-credentials' // Jenkins credentials ID for kubeconfig (Secret file)
+    IMAGE_REPO = "${env.REGISTRY_HOST ?: 'registry.example.com'}/${env.JOB_NAME ?: 'project'}/app"
+    IMAGE_TAG = "${env.GIT_COMMIT?.substring(0,7) ?: 'local'}"
+    KUBE_NAMESPACE = "default"
+    HELM_RELEASE_BACKEND = "backend"
+    HELM_RELEASE_FRONTEND = "frontend"
+  }
+
+  options {
+    timestamps()
+    buildDiscarder(logRotator(numToKeepStr: '20'))
+    timeout(time: 60, unit: 'MINUTES')
+  }
+
+  stages {
+    stage('Checkout') {
+      steps {
+        checkout scm
+      }
+    }
+
+    stage('Build') {
+      agent {
+        docker {
+          image 'golang:1.20-alpine'
+          args '--network host'
+        }
+      }
+      steps {
+        script {
+          echo "Build step - compile or prepare artifacts if needed"
+          sh '''
+            if [ -f Makefile ]; then
+              make build || true
+            else
+              echo "No build step defined"
+            fi
+          '''
+        }
+      }
+    }
+
+    stage('Unit Tests') {
+      agent {
+        docker { image 'node:20-alpine' }
+      }
+      steps {
+        script {
+          echo "Run unit tests if present"
+          sh '''
+            if [ -f package.json ]; then
+              npm ci
+              npm test || true
+            else
+              echo "No JS tests configured"
+            fi
+          '''
+        }
+      }
+    }
+
+    stage('Build & Push Image') {
+      agent {
+        docker { image 'gcr.io/kaniko-project/executor:latest' }
+      }
+      steps {
+        withCredentials([usernamePassword(credentialsId: env.REGISTRY_CREDENTIALS, usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS')]) {
+          script {
+            sh '''
+              echo "{\"auths\":{\"${REGISTRY_HOST:-$CI_REGISTRY}\":{\"username\":\"${REG_USER}\",\"password\":\"${REG_PASS}\"}}}" > /kaniko/.docker/config.json || true
+              /kaniko/executor --context $WORKSPACE --dockerfile $WORKSPACE/Dockerfile --destination ${IMAGE_REPO}:${IMAGE_TAG} --cache=true --cache-repo ${IMAGE_REPO}/cache
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Push Helm Charts (optional)') {
+      steps {
+        echo "Charts are packaged in repo under helm-charts/; optionally push to chartmuseum or OCI registry"
+      }
+    }
+
+    stage('Deploy to Staging') {
+      when {
+        branch 'develop'
+      }
+      steps {
+        script {
+          withCredentials([file(credentialsId: env.KUBECONFIG_CREDENTIALS, variable: 'KUBECONFIG_FILE')]) {
+            sh '''
+              export KUBECONFIG=${KUBECONFIG_FILE}
+              helm repo update || true
+              helm upgrade --install ${HELM_RELEASE_BACKEND} helm-charts/backend --namespace ${KUBE_NAMESPACE} --create-namespace --set image.repository=${IMAGE_REPO} --set image.tag=${IMAGE_TAG} --wait --timeout 5m
+              helm upgrade --install ${HELM_RELEASE_FRONTEND} helm-charts/frontend --namespace ${KUBE_NAMESPACE} --create-namespace --set image.repository=${IMAGE_REPO} --set image.tag=${IMAGE_TAG} --wait --timeout 5m
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Deploy to Production') {
+      when {
+        branch 'main'
+      }
+      input {
+        message "Approve deployment to production?"
+        ok "Deploy"
+      }
+      steps {
+        script {
+          withCredentials([file(credentialsId: env.KUBECONFIG_CREDENTIALS, variable: 'KUBECONFIG_FILE')]) {
+            sh '''
+              export KUBECONFIG=${KUBECONFIG_FILE}
+              helm repo update || true
+              helm upgrade --install ${HELM_RELEASE_BACKEND} helm-charts/backend --namespace ${KUBE_NAMESPACE} --create-namespace --set image.repository=${IMAGE_REPO} --set image.tag=${IMAGE_TAG} --values helm-charts/backend/values-prod.yaml --wait --timeout 10m
+              helm upgrade --install ${HELM_RELEASE_FRONTEND} helm-charts/frontend --namespace ${KUBE_NAMESPACE} --create-namespace --set image.repository=${IMAGE_REPO} --set image.tag=${IMAGE_TAG} --values helm-charts/frontend/values-prod.yaml --wait --timeout 10m
+            '''
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    success {
+      echo "Pipeline completed successfully"
+    }
+    failure {
+      echo "Pipeline failed - check logs"
+    }
+    always {
+      cleanWs()
+    }
+  }
+}
